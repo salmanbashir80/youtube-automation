@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+const crypto = require('crypto');
 const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
@@ -213,12 +214,19 @@ class YouTubeAutomationAgent {
   }
 
   requireAPIKey() {
+    // Fail closed: without a configured API_KEY, private routes refuse every request.
     return (req, res, next) => {
-      if (!process.env.API_KEY) {
-        return next();
+      const expected = process.env.API_KEY;
+      if (!expected) {
+        return res.status(503).json({ success: false, error: 'API_KEY is not configured on the server' });
       }
 
-      if (req.get('x-api-key') !== process.env.API_KEY) {
+      const provided = req.get('x-api-key') || '';
+      const expectedBuffer = Buffer.from(expected);
+      const providedBuffer = Buffer.from(provided);
+      const matches = expectedBuffer.length === providedBuffer.length &&
+        crypto.timingSafeEqual(expectedBuffer, providedBuffer);
+      if (!matches) {
         return res.status(401).json({ success: false, error: 'Unauthorized' });
       }
 
@@ -377,7 +385,7 @@ class YouTubeAutomationAgent {
     this.app.use(express.static(path.join(__dirname, 'dashboard')));
 
     if (!process.env.API_KEY) {
-      this.logger.warn('API_KEY is not set; mutating API routes are unprotected');
+      this.logger.warn('API_KEY is not set; all private API routes will refuse requests until it is configured');
     }
     
     // Main dashboard route
@@ -417,7 +425,7 @@ class YouTubeAutomationAgent {
     });
 
     // Get analytics
-    this.app.get('/analytics', async (req, res) => {
+    this.app.get('/analytics', this.requireAPIKey(), async (req, res) => {
       try {
         if (!this.agents.analytics) return res.json({ totalVideos: 0, averagePerformanceScore: 0, topPerformers: [], insights: [], learning: null });
         const analytics = await this.agents.analytics.getRecentAnalytics();
@@ -428,7 +436,7 @@ class YouTubeAutomationAgent {
       }
     });
 
-    this.app.get('/api/outcomes', async (_req, res) => {
+    this.app.get('/api/outcomes', this.requireAPIKey(), async (_req, res) => {
       try {
         const learning = this.agents.analytics?.getLearningSummary
           ? await this.agents.analytics.getLearningSummary()
@@ -440,7 +448,7 @@ class YouTubeAutomationAgent {
     });
 
     // Get upcoming schedule
-    this.app.get('/schedule', async (req, res) => {
+    this.app.get('/schedule', this.requireAPIKey(), async (req, res) => {
       try {
         const schedule = await this.db.getUpcomingSchedule();
         res.json(schedule);
@@ -472,7 +480,7 @@ class YouTubeAutomationAgent {
   setupOperatorAPI() {
     const protect = this.requireAPIKey();
 
-    this.app.get('/api/dashboard', async (_req, res) => {
+    this.app.get('/api/dashboard', protect, async (_req, res) => {
       try {
         const [stats, jobs, pipeline, schedule, events, notifications, profile, settings, ideas, analytics, learning, activation, channelStrategy, operatorRuns, readiness, engagement, experiments] = await Promise.all([
           this.db.getStats(),
@@ -530,7 +538,7 @@ class YouTubeAutomationAgent {
       }
     });
 
-    this.app.get('/api/jobs/:jobId', async (req, res) => {
+    this.app.get('/api/jobs/:jobId', protect, async (req, res) => {
       const job = await this.db.getGenerationJob(req.params.jobId);
       if (!job) return res.status(404).json({ error: 'Job not found' });
       job.checkpoints = await this.db.listGenerationCheckpoints(job.id);
@@ -548,7 +556,7 @@ class YouTubeAutomationAgent {
       }
     });
 
-    this.app.get('/api/readiness', async (_req, res) => {
+    this.app.get('/api/readiness', protect, async (_req, res) => {
       if (!this.readiness) return res.status(503).json({ error: 'Readiness service is not initialized' });
       return res.json(await this.readiness.getSummary());
     });
@@ -576,7 +584,7 @@ class YouTubeAutomationAgent {
       return res.json({ success: true, result: updated });
     });
 
-    this.app.get('/api/content/:productionId', async (req, res) => {
+    this.app.get('/api/content/:productionId', protect, async (req, res) => {
       let bundle = await this.db.getProductionBundle(req.params.productionId);
       if (!bundle) return res.status(404).json({ error: 'Content not found' });
       if (this.scenes && !bundle.scenes?.length) {
@@ -586,7 +594,7 @@ class YouTubeAutomationAgent {
       return res.json(this.decorateContentBundle(bundle));
     });
 
-    this.app.get('/api/content/:productionId/scenes/:sceneId/estimate', async (req, res) => {
+    this.app.get('/api/content/:productionId/scenes/:sceneId/estimate', protect, async (req, res) => {
       try {
         if (!this.scenes) return res.status(503).json({ error: 'Scene repair requires completed setup' });
         const result = await this.scenes.regenerationEstimate(req.params.productionId, req.params.sceneId, {
@@ -674,7 +682,7 @@ class YouTubeAutomationAgent {
       }
     });
 
-    this.app.get('/api/content/:productionId/shorts/:clipId/asset/:kind', async (req, res) => {
+    this.app.get('/api/content/:productionId/shorts/:clipId/asset/:kind', protect, async (req, res) => {
       try {
         const clip = await this.db.getShortClip(req.params.clipId);
         if (!clip || clip.productionId !== req.params.productionId) return res.status(404).json({ error: 'Short asset not found' });
@@ -748,7 +756,7 @@ class YouTubeAutomationAgent {
       }
     });
 
-    this.app.get('/api/content/:productionId/scenes/:sceneId/asset', async (req, res) => {
+    this.app.get('/api/content/:productionId/scenes/:sceneId/asset', protect, async (req, res) => {
       try {
         const scene = await this.db.getProductionScene(req.params.productionId, req.params.sceneId);
         if (!scene?.assetPath) return res.status(404).json({ error: 'Scene asset not found' });
@@ -818,7 +826,7 @@ class YouTubeAutomationAgent {
       return res.status(202).json({ success: true, result: job });
     });
 
-    this.app.get('/api/content/:productionId/asset/:kind', async (req, res) => {
+    this.app.get('/api/content/:productionId/asset/:kind', protect, async (req, res) => {
       try {
         const bundle = await this.db.getProductionBundle(req.params.productionId);
         if (!bundle) return res.status(404).json({ error: 'Content not found' });
@@ -998,7 +1006,7 @@ class YouTubeAutomationAgent {
       }
     });
 
-    this.app.get('/api/experiments', async (_req, res) => {
+    this.app.get('/api/experiments', protect, async (_req, res) => {
       try {
         const summary = this.experiments
           ? await this.experiments.getSummary()
@@ -1044,7 +1052,7 @@ class YouTubeAutomationAgent {
       }
     });
 
-    this.app.get('/api/retention/:videoId', async (req, res) => {
+    this.app.get('/api/retention/:videoId', protect, async (req, res) => {
       const videoId = String(req.params.videoId || '').trim();
       if (!/^[A-Za-z0-9_-]{1,100}$/.test(videoId)) {
         return res.status(400).json({ error: 'A valid YouTube video ID is required' });
@@ -1079,7 +1087,7 @@ class YouTubeAutomationAgent {
 
     const ENGAGEMENT_VIDEO_ID = /^[A-Za-z0-9_-]{1,100}$/;
 
-    this.app.get('/api/engagement/:videoId', async (req, res) => {
+    this.app.get('/api/engagement/:videoId', protect, async (req, res) => {
       try {
         const videoId = String(req.params.videoId || '').trim();
         if (!ENGAGEMENT_VIDEO_ID.test(videoId)) {

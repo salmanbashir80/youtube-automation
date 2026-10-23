@@ -8,6 +8,9 @@ const path = require('path');
 const { ProductionReadinessService } = require('./utils/production-readiness-service');
 const { normalizeTags, validateYouTubeMetadata } = require('./utils/youtube-metadata-validator');
 
+// Private API routes fail closed without API_KEY, so tests that exercise them use a local-only key.
+process.env.API_KEY = process.env.API_KEY || 'test-api-key-local-only';
+
 class SystemTest {
   constructor() {
     this.logger = new Logger('SystemTest');
@@ -312,7 +315,7 @@ class SystemTest {
         const running = agent.app.listen(0, () => resolve(running));
       });
       const { port } = server.address();
-      const response = await fetch(`http://127.0.0.1:${port}/api/dashboard`);
+      const response = await fetch(`http://127.0.0.1:${port}/api/dashboard`, { headers: { 'x-api-key': process.env.API_KEY } });
       const dashboard = await response.json();
       if (
         !response.ok ||
@@ -325,7 +328,7 @@ class SystemTest {
       }
       const unavailableStart = await fetch(`http://127.0.0.1:${port}/api/operator/start`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.API_KEY },
         body: '{}'
       });
       if (unavailableStart.status !== 503) {
@@ -343,7 +346,7 @@ class SystemTest {
       });
       const approveLearning = await fetch(
         `http://127.0.0.1:${port}/api/learning/recommendations/${learningRecommendation.id}/approve`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
+        { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.API_KEY }, body: '{}' }
       );
       const approvedLearning = await approveLearning.json();
       if (!approveLearning.ok || approvedLearning.result?.status !== 'approved') {
@@ -1792,7 +1795,7 @@ class SystemTest {
       });
       try {
         const address = server.address();
-        const apiHeaders = { 'content-type': 'application/json', ...(process.env.API_KEY ? { 'x-api-key': process.env.API_KEY } : {}) };
+        const apiHeaders = { 'content-type': 'application/json', 'x-api-key': process.env.API_KEY };
         const runResponse = await fetch(`http://127.0.0.1:${address.port}/api/content/${productionId}/discoverability/run`, {
           method: 'POST', headers: apiHeaders, body: JSON.stringify({ platform: 'youtube' })
         });
@@ -2047,6 +2050,17 @@ class SystemTest {
 
     if (!acceptedNextCalled || acceptedResponse.statusCode) {
       throw new Error('Valid API key was not accepted');
+    }
+
+    delete process.env.API_KEY;
+    let unconfiguredNextCalled = false;
+    const unconfiguredResponse = this.createMockResponse();
+    agent.requireAPIKey()({ get: () => '' }, unconfiguredResponse, () => {
+      unconfiguredNextCalled = true;
+    });
+
+    if (unconfiguredNextCalled || unconfiguredResponse.statusCode !== 503) {
+      throw new Error('Private routes were not refused when API_KEY is unset (fail-open regression)');
     }
 
     if (previousKey === undefined) {
