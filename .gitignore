@@ -90,3 +90,6 @@ data/thumbnails/
 
 # Claude worktrees
 .claude/worktrees/
+
+# Isolated optional local tool installs (and their OAuth tokens)
+.local-tools/
